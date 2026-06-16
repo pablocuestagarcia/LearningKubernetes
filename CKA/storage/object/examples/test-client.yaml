@@ -1,0 +1,37 @@
+# Pod cliente con `mc` (MinIO Client) para validar el almacén de objetos.
+#
+# Uso:
+#   kubectl apply -f test-client.yaml
+#   kubectl -n minio exec -it deploy/mc-client -- sh
+#     mc alias set local http://minio:9000 admin minio-cka-lab-2026
+#     mc ls local
+#     echo "hola CKA" | mc pipe local/cka-lab/saludo.txt
+#     mc cat local/cka-lab/saludo.txt
+#
+# El cliente es una carga "general", por eso NO tolera el taint de storage:
+# se ejecuta en un worker normal y habla con MinIO por red.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mc-client
+  namespace: minio
+  labels:
+    app: mc-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mc-client
+  template:
+    metadata:
+      labels:
+        app: mc-client
+    spec:
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi

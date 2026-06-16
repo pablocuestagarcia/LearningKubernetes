@@ -1,0 +1,75 @@
+# Helm values para Longhorn (bloques replicado) con criterio de PRODUCCIÓN.
+# Chart: longhorn/longhorn  (https://charts.longhorn.io)
+#
+# REQUISITO PREVIO en TODOS los nodos que sirvan/consuman volúmenes:
+#   - open-iscsi (módulo iscsi_tcp) cargado y servicio iscsid activo
+#   - NFSv4 client (nfs-common) para volúmenes RWX
+#   - cgroup v2 y un kernel soportado
+# En kind sobre Docker Desktop/WSL2 el kernel NO trae iscsi_tcp -> Longhorn no
+# arranca ahí. Usar un sistema Linux nativo. Ver readme.md.
+
+defaultSettings:
+  # Producción: 3 réplicas en 3 nodos distintos. En un lab de 2 nodos -> 2.
+  defaultReplicaCount: 3
+  # Réplicas en nodos distintos de forma estricta (HA real).
+  replicaSoftAntiAffinity: false
+  replicaZoneSoftAntiAffinity: false
+  # Rebalanceo automático de réplicas cuando se añaden nodos.
+  replicaAutoBalance: best-effort
+  # Mantener una réplica local al pod para mejorar lectura.
+  defaultDataLocality: best-effort
+  # Margen de seguridad de espacio.
+  storageOverProvisioningPercentage: 100
+  storageMinimalAvailablePercentage: 25
+  # Reservar CPU para el instance-manager (estabilidad bajo carga).
+  guaranteedInstanceManagerCPU: 12
+  # Borrar el pod si su nodo cae, para que se reprograme y re-adjunte.
+  nodeDownPodDeletionPolicy: delete-both-statefulset-and-deployment-pod
+  # Disco de datos dedicado en los nodos (no el disco raíz) en producción.
+  defaultDataPath: /var/lib/longhorn
+  # Tolerar el taint de los nodos de storage en componentes gestionados.
+  taintToleration: "dedicated=storage:NoSchedule"
+  # Programar componentes de sistema solo en nodos de storage.
+  systemManagedComponentsNodeSelector: "node-role.kubernetes.io/storage:"
+  # --- Backups: apuntan al MinIO de este mismo lab (S3) ---
+  # Crear antes el Secret 'longhorn-minio-secret' (ver readme.md).
+  backupTarget: s3://longhorn-backups@us-east-1/
+  backupTargetCredentialSecret: longhorn-minio-secret
+
+# StorageClass por defecto que crea Longhorn (no pisar la 'standard' del cluster).
+persistence:
+  defaultClass: false
+  defaultClassReplicaCount: 3
+  reclaimPolicy: Delete
+
+# Prioridad alta para no ser desalojado.
+priorityClass:
+  create: true
+  value: 1000000
+
+# Pinear manager / driver / UI a los nodos de storage y tolerar su taint.
+longhornManager:
+  nodeSelector:
+    node-role.kubernetes.io/storage: ""
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: storage
+      effect: NoSchedule
+longhornDriver:
+  nodeSelector:
+    node-role.kubernetes.io/storage: ""
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: storage
+      effect: NoSchedule
+longhornUI:
+  replicas: 2
+  nodeSelector:
+    node-role.kubernetes.io/storage: ""
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: storage
+      effect: NoSchedule

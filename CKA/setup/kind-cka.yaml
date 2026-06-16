@@ -1,0 +1,82 @@
+# kind cluster definition for the CKA practice environment.
+#
+# Topology: 8 nodes -> 2 control-plane + 6 workers.
+# With more than one control-plane node, kind automatically provisions an
+# external HAProxy load balancer in front of the API servers, giving you a
+# realistic highly-available control plane to practise on (etcd, kubeadm,
+# node draining, certificate renewal, etc.).
+#
+# Usage:
+#   kind create cluster --config kind-cka.yaml
+#   (or use ./cluster.ps1 / ./cluster.sh which wrap this file)
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: cka
+
+# Pin the Kubernetes version so the environment is reproducible and close to
+# the version used in the current CKA exam. Bump the image tag to upgrade.
+nodes:
+  # ----- Control plane (2) -----
+  - role: control-plane
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: control-plane
+  - role: control-plane
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: control-plane
+
+  # ----- General-purpose workers (4) -----
+  - role: worker
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: worker
+  - role: worker
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: worker
+  - role: worker
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: worker
+  - role: worker
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: worker
+
+  # ----- Storage workers (2) -----
+  # Both nodes are dedicated to storage and shared by ALL storage systems:
+  # MinIO (distributed object storage) and Longhorn (replicated block storage)
+  # run across the two of them at the same time. They are labelled so storage
+  # workloads can target them and tainted (dedicated=storage:NoSchedule) so that
+  # general workloads are kept off — storage solutions must tolerate the taint.
+  #
+  # Distribution comes from each node contributing several drives (directories):
+  #   * MinIO  -> 2 nodes x 2 drives = 4-drive erasure set
+  #   * Longhorn -> 1 replica per node (numberOfReplicas: 2)
+  - role: worker
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: storage
+      node-role.kubernetes.io/storage: ""
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: dedicated
+              value: storage
+              effect: NoSchedule
+  - role: worker
+    image: kindest/node:v1.34.0
+    labels:
+      node-role.cka/role: storage
+      node-role.kubernetes.io/storage: ""
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: dedicated
+              value: storage
+              effect: NoSchedule

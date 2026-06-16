@@ -1,0 +1,18 @@
+# StorageClass de bloques sobre Longhorn.
+# Aplicar DESPUÉS de instalar Longhorn:  kubectl apply -f storageclass.yaml
+#
+# Producción: numberOfReplicas "3" (en 3 nodos distintos). En un lab de 2 nodos
+# de storage, baja este valor a "2" o las réplicas quedarán en estado degraded.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-block
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "3"          # lab de 2 nodos -> "2"
+  staleReplicaTimeout: "30"      # minutos antes de limpiar una réplica caída
+  fsType: ext4
+  dataLocality: best-effort      # una réplica local al pod para lectura rápida

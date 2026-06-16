@@ -1,0 +1,74 @@
+# Helm values para MinIO en modo DISTRIBUIDO (erasure coding) — chart minio/minio.
+#
+# Topología: 2 nodos de storage x 2 drives (directorios) cada uno = 4-drive
+# erasure set. MinIO reparte datos+paridad entre los 4 drives y, al estar 2 en
+# cada nodo, tolera la caída de un nodo en lectura (paridad por defecto EC:N/2).
+#
+# Repo:  helm repo add minio https://charts.min.io/
+# Instalar (ver readme.md):
+#   helm install minio minio/minio -n minio --create-namespace -f values.yaml
+
+# --- Modo distribuido ---
+mode: distributed
+replicas: 2          # un pod del StatefulSet por nodo de storage
+drivesPerNode: 2     # 2 drives/directorios por nodo -> 4 drives en total (mínimo EC)
+
+# --- Credenciales (LABORATORIO — en producción usar un Secret externo) ---
+# Producción: existingSecret con rootUser/rootPassword en vez de texto plano.
+rootUser: admin
+rootPassword: minio-cka-lab-2026
+
+# --- Persistencia: un PVC por drive (volumeClaimTemplate del StatefulSet) ---
+# En producción cada drive debería ser un disco físico dedicado (XFS, JBOD),
+# no varias carpetas del mismo disco. En kind van sobre local-path (mismo disco).
+persistence:
+  enabled: true
+  storageClass: standard
+  size: 5Gi          # por drive
+
+# --- Recursos (subir en producción; MinIO escala con CPU/red/RAM) ---
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 250m
+  limits:
+    memory: 1Gi
+
+# --- Aislar en los nodos de storage y tolerar su taint ---
+nodeSelector:
+  node-role.kubernetes.io/storage: ""
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: storage
+    effect: NoSchedule
+
+# --- Anti-afinidad: un pod de MinIO por nodo (clave para que sea distribuido) ---
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+            - key: app
+              operator: In
+              values: [minio]
+        topologyKey: kubernetes.io/hostname
+
+# --- Servicios (ClusterIP; acceso por port-forward en el lab) ---
+service:
+  type: ClusterIP
+  port: 9000
+consoleService:
+  type: ClusterIP
+  port: 9001
+
+# --- Bucket de ejemplo creado al instalar ---
+buckets:
+  - name: cka-lab
+    policy: none
+    purge: false
+
+# Métricas Prometheus (activar en producción / para el PCA)
+metrics:
+  serviceMonitor:
+    enabled: false
