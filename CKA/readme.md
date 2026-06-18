@@ -23,5 +23,6 @@ See [setup/readme.md](setup/readme.md) for full details.
 ## Topics
 
 - [storage/](storage/) — persistent volumes, claims and storage classes.
+- [networking/](networking/) — Pod/Service networking, DNS, Ingress, NetworkPolicies.
 
 _(More sections will be added as the CKA curriculum is covered.)_
