@@ -1,0 +1,78 @@
+# Helm values para kube-prometheus-stack RECORTADO, para el lab CKA (Multipass).
+# Chart: prometheus-community/kube-prometheus-stack
+#
+# Objetivo: alimentar las GRÁFICAS HISTÓRICAS de FreeLens con Prometheus, sin
+# montar todo el stack de monitoreo. NO confundir con metrics-server: ese sigue
+# sirviendo `kubectl top` / HPA (métricas instantáneas vía metrics.k8s.io).
+# Prometheus es scraper + TSDB (series temporales) y es lo que FreeLens consulta.
+#
+# Colocación en la topología (ver ../../setup/multipass/readme.md):
+#   - Prometheus, el operator y kube-state-metrics -> workers de workloads
+#     (cka-w1/w2). NO se les pone toleration, así el taint de los data nodes
+#     (dedicated=storage:NoSchedule) los repele solo. Prometheus NO va a los data
+#     nodes: esos están reservados a Longhorn/MinIO; su TSDB es almacenamiento
+#     interno, no tiene relación con la capa de storage del cluster.
+#   - node-exporter (DaemonSet) -> el ÚNICO que debe llegar a TODOS los nodos,
+#     incluidos los data nodes; lleva una toleration amplia para no dejarlos fuera.
+
+# --- Fuera del lab: lo que no necesitamos para FreeLens ---
+grafana:
+  enabled: false
+alertmanager:
+  enabled: false
+
+# --- Prometheus server ---
+prometheus:
+  prometheusSpec:
+    # Retención corta: lab con VMs de disco pequeño.
+    retention: 3d
+    # Sin storageSpec -> usa emptyDir (los datos se pierden si el pod se reinicia,
+    # aceptable en lab). Para persistencia: añadir storageSpec con un PVC de
+    # Longhorn una vez instalado el storage.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+    # Descubrir TODOS los ServiceMonitor/PodMonitor del cluster, no solo los de
+    # este release de Helm.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+# --- node-exporter: métricas de HOST en cada nodo (incl. data nodes) ---
+prometheus-node-exporter:
+  # Toleration amplia para que el DaemonSet llegue también a los data nodes
+  # tainteados (dedicated=storage:NoSchedule) y a cualquier otro taint de sistema.
+  # Sin esto, no verías métricas de host de cka-data1/2.
+  tolerations:
+    - operator: Exists
+
+# --- kube-state-metrics: estado de objetos K8s (un solo Deployment) ---
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+
+# --- kubelet / cAdvisor ---
+# El kubelet de kubeadm usa certs serving autofirmados. El ServiceMonitor del
+# kubelet de este chart ya scrapea con insecureSkipVerify por defecto (equivalente
+# al --kubelet-insecure-tls de metrics-server), así que no hay que tocar nada.
+kubelet:
+  enabled: true
+
+# --- Prometheus Operator (también en los workers) ---
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  # El admission webhook se entrega con un hook pre-install (Job kube-webhook-certgen)
+  # que Helm espera ANTES de crear nada más; en clusters pequeños/lentos ese hook se
+  # cuelga y el install se queda en 'pending-install' sin desplegar Prometheus. En un
+  # lab no aporta (solo valida PrometheusRule/objetos en el apiserver) -> lo apagamos.
+  admissionWebhooks:
+    enabled: false
+  tls:
+    enabled: false

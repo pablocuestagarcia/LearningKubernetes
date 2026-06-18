@@ -19,23 +19,30 @@
 .EXAMPLE
     ./cluster.ps1 up                       # 1 CP + 2 workers + 2 data nodes
     ./cluster.ps1 up -Workers 3 -DataNodes 3
+    ./cluster.ps1 up -WorkerMemory 4G      # workers a 4 GB, CP y data a 2 GB
     ./cluster.ps1 status
     ./cluster.ps1 down
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'down', 'status', 'kubeconfig')]
+    [ValidateSet('up', 'down', 'status', 'kubeconfig', 'cni', 'metrics')]
     [string]$Action = 'status',
 
     [int]$Workers = 2,                 # nodos de workloads (sin taint)
     [int]$DataNodes = 2,               # nodos de datos/storage (label + taint)
     [string]$Image = '24.04',
     [string]$Cpus = '2',
-    [string]$Memory = '2G',
+    [string]$Memory = '2G',            # memoria base (control-plane y, por defecto, el resto)
+    [string]$WorkerMemory = '',        # memoria de los workers de workloads (vacío = $Memory)
+    [string]$DataMemory = '',          # memoria de los data nodes (vacío = $Memory)
     [string]$Disk = '20G',             # disco de CP y workers
     [string]$DataDisk = '30G',         # disco mayor para los data nodes
-    [string]$PodCidr = '10.244.0.0/16'
+    [string]$PodCidr = '10.244.0.0/16',
+
+    [ValidateSet('flannel', 'calico', 'cilium')]
+    [string]$Cni = 'flannel',          # CNI a instalar (cilium = datapath eBPF)
+    [bool]$MetricsServer = $true        # instalar metrics-server (kubectl top / HPA)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,11 +53,15 @@ if ($DataNodes -lt 2 -and $Action -eq 'up') {
 
 $CpName = 'cka-cp'
 
-# Especificación de nodos: nombre, rol y disco.
+# Memoria por rol: si no se pasa override, se usa la base ($Memory).
+if (-not $WorkerMemory) { $WorkerMemory = $Memory }
+if (-not $DataMemory)   { $DataMemory   = $Memory }
+
+# Especificación de nodos: nombre, rol, disco y memoria.
 $NodeSpecs = @()
-$NodeSpecs += [pscustomobject]@{ Name = $CpName; Role = 'control-plane'; Disk = $Disk }
-1..$Workers   | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-w$_";    Role = 'worker';  Disk = $Disk } }
-1..$DataNodes | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-data$_"; Role = 'storage'; Disk = $DataDisk } }
+$NodeSpecs += [pscustomobject]@{ Name = $CpName; Role = 'control-plane'; Disk = $Disk; Memory = $Memory }
+1..$Workers   | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-w$_";    Role = 'worker';  Disk = $Disk;     Memory = $WorkerMemory } }
+1..$DataNodes | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-data$_"; Role = 'storage'; Disk = $DataDisk; Memory = $DataMemory } }
 
 $WorkerSpecs = $NodeSpecs | Where-Object { $_.Role -ne 'control-plane' }
 $DataSpecs   = $NodeSpecs | Where-Object { $_.Role -eq 'storage' }
@@ -90,6 +101,81 @@ function Invoke-Kubectl([string]$CmdArgs) {
     Invoke-OnVm $CpName "KUBECONFIG=/etc/kubernetes/admin.conf kubectl $CmdArgs"
 }
 
+# Exporta el admin.conf del control-plane al host.
+# Usa 'multipass transfer' (escribe el fichero directamente): canalizar la salida
+# de 'multipass exec' a Set-Content se cuelga en Windows con ficheros grandes.
+function Export-Kubeconfig {
+    Invoke-OnVm $CpName 'cp /etc/kubernetes/admin.conf /home/ubuntu/admin.conf && chown ubuntu:ubuntu /home/ubuntu/admin.conf'
+    if (Test-Path $KubeconfigOut) { Remove-Item $KubeconfigOut -Force }
+    multipass transfer "${CpName}:/home/ubuntu/admin.conf" $KubeconfigOut 2>$null
+    Invoke-OnVm $CpName 'rm -f /home/ubuntu/admin.conf'
+    Write-Host "kubeconfig escrito en: $KubeconfigOut" -ForegroundColor Green
+    Write-Host "Úsalo con:  `$env:KUBECONFIG = '$KubeconfigOut'" -ForegroundColor Green
+}
+
+# Instala el CNI elegido (-Cni). Todo se ejecuta en el control-plane.
+function Install-Cni {
+    Write-Host "Instalando CNI: $Cni..." -ForegroundColor Cyan
+    switch ($Cni) {
+        'flannel' {
+            # La red por defecto de Flannel coincide con $PodCidr (10.244.0.0/16).
+            Invoke-Kubectl 'apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml'
+        }
+        'calico' {
+            # Operador Tigera + recurso Installation con NUESTRO CIDR.
+            Invoke-Kubectl 'create -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/tigera-operator.yaml'
+            $calico = @'
+cat <<'EOF' >/tmp/calico-installation.yaml
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+      - name: default-ipv4-ippool
+        blockSize: 26
+        cidr: __PODCIDR__
+        encapsulation: VXLANCrossSubnet
+        natOutgoing: Enabled
+        nodeSelector: all()
+---
+apiVersion: operator.tigera.io/v1
+kind: APIServer
+metadata:
+  name: default
+spec: {}
+EOF
+KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /tmp/calico-installation.yaml
+'@
+            Invoke-OnVm $CpName $calico.Replace('__PODCIDR__', $PodCidr)
+        }
+        'cilium' {
+            # Datapath eBPF. Se instala con la CLI de Cilium (auto-detecta kubeadm).
+            $cilium = @'
+set -e
+CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+curl -sL --fail https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-amd64.tar.gz -o /tmp/cilium.tgz
+tar -C /usr/local/bin -xzf /tmp/cilium.tgz
+KUBECONFIG=/etc/kubernetes/admin.conf cilium install --set ipam.operator.clusterPoolIPv4PodCIDRList=__PODCIDR__
+'@
+            Invoke-OnVm $CpName $cilium.Replace('__PODCIDR__', $PodCidr)
+        }
+    }
+}
+
+# Instala metrics-server (kubectl top, HPA). En kubeadm los kubelets usan certs
+# serving autofirmados, así que hay que añadir --kubelet-insecure-tls.
+function Install-MetricsServer {
+    Write-Host "Instalando metrics-server..." -ForegroundColor Cyan
+    Invoke-Kubectl 'apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml'
+    # El patch JSON se pasa en base64 para evitar el mangling de comillas dobles
+    # de PowerShell 5.1 al cruzar al proceso nativo (multipass -> bash).
+    $patch = '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($patch))
+    Invoke-OnVm $CpName "echo $b64 | base64 -d >/tmp/ms-patch.json && KUBECONFIG=/etc/kubernetes/admin.conf kubectl patch -n kube-system deployment metrics-server --type=json --patch-file /tmp/ms-patch.json"
+}
+
 Assert-Tooling
 
 switch ($Action) {
@@ -100,8 +186,8 @@ switch ($Action) {
                 Write-Host "VM $($spec.Name) ya existe, se omite." -ForegroundColor Yellow
             }
             else {
-                Write-Host "Lanzando VM $($spec.Name) [$($spec.Role)] (disk $($spec.Disk))..." -ForegroundColor Cyan
-                multipass launch $Image --name $spec.Name --cpus $Cpus --memory $Memory --disk $spec.Disk --cloud-init $CloudInit
+                Write-Host "Lanzando VM $($spec.Name) [$($spec.Role)] (mem $($spec.Memory), disk $($spec.Disk))..." -ForegroundColor Cyan
+                multipass launch $Image --name $spec.Name --cpus $Cpus --memory $spec.Memory --disk $spec.Disk --cloud-init $CloudInit
             }
         }
 
@@ -119,9 +205,8 @@ switch ($Action) {
             Invoke-OnVm $CpName "kubeadm init --pod-network-cidr=$PodCidr --apiserver-advertise-address=$cpIp"
         }
 
-        # 4. CNI (Flannel; su red por defecto coincide con $PodCidr)
-        Write-Host "Instalando CNI (Flannel)..." -ForegroundColor Cyan
-        Invoke-Kubectl 'apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml'
+        # 4. CNI (seleccionable con -Cni: flannel | calico | cilium)
+        Install-Cni
 
         # 5. Unir los workers (de workloads y data nodes)
         $join = (Invoke-OnVm $CpName 'kubeadm token create --print-join-command' | Where-Object { $_ -match 'kubeadm join' } | Select-Object -Last 1).Trim()
@@ -149,10 +234,12 @@ switch ($Action) {
             }
         }
 
+        # 6b. metrics-server (kubectl top / HPA)
+        if ($MetricsServer) { Install-MetricsServer }
+
         # 7. Exportar kubeconfig al host
-        Invoke-OnVm $CpName 'cat /etc/kubernetes/admin.conf' | Set-Content -Encoding ascii $KubeconfigOut
-        Write-Host "`nkubeconfig escrito en: $KubeconfigOut" -ForegroundColor Green
-        Write-Host "Úsalo con:  `$env:KUBECONFIG = '$KubeconfigOut'" -ForegroundColor Green
+        Write-Host ""
+        Export-Kubeconfig
         Write-Host "`nData nodes (storage): $($DataSpecs.Name -join ', ')" -ForegroundColor Green
         Write-Host ""
         Invoke-Kubectl 'get nodes -o wide --show-labels'
@@ -172,8 +259,14 @@ switch ($Action) {
         if (Test-VmExists $CpName) { Invoke-Kubectl 'get nodes -o wide' }
     }
     'kubeconfig' {
-        Invoke-OnVm $CpName 'cat /etc/kubernetes/admin.conf' | Set-Content -Encoding ascii $KubeconfigOut
-        Write-Host "kubeconfig escrito en: $KubeconfigOut" -ForegroundColor Green
-        Write-Host "Úsalo con:  `$env:KUBECONFIG = '$KubeconfigOut'" -ForegroundColor Green
+        Export-Kubeconfig
+    }
+    'cni' {
+        # Instala el CNI -Cni en un cluster ya existente.
+        Install-Cni
+    }
+    'metrics' {
+        # Instala metrics-server en un cluster ya existente.
+        Install-MetricsServer
     }
 }

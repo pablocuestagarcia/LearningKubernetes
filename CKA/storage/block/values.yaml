@@ -9,8 +9,9 @@
 # arranca ahí. Usar un sistema Linux nativo. Ver readme.md.
 
 defaultSettings:
-  # Producción: 3 réplicas en 3 nodos distintos. En un lab de 2 nodos -> 2.
-  defaultReplicaCount: 3
+  # Lab de 2 nodos de storage -> 2 réplicas (en producción serían 3 en 3 nodos;
+  # con 3 aquí quedarían en estado 'Degraded' por falta de nodos).
+  defaultReplicaCount: 2
   # Réplicas en nodos distintos de forma estricta (HA real).
   replicaSoftAntiAffinity: false
   replicaZoneSoftAntiAffinity: false
@@ -36,10 +37,11 @@ defaultSettings:
   backupTarget: s3://longhorn-backups@us-east-1/
   backupTargetCredentialSecret: longhorn-minio-secret
 
-# StorageClass por defecto que crea Longhorn (no pisar la 'standard' del cluster).
+# StorageClass que crea Longhorn (defaultClass: false -> NO pisa la default del
+# cluster, que en multipass es 'local-path').
 persistence:
   defaultClass: false
-  defaultClassReplicaCount: 3
+  defaultClassReplicaCount: 2   # lab de 2 nodos (prod: 3)
   reclaimPolicy: Delete
 
 # Prioridad alta para no ser desalojado.

@@ -1,9 +1,19 @@
 # CKA — Storage lab
 
-Laboratorio para explorar **almacenamiento distribuido** en Kubernetes:
-**MinIO** (objetos) y **Longhorn** (bloques). Ambos sistemas corren sobre los
-**mismos dos nodos de storage**, y la distribución sale de que cada nodo aporta
-varios drives/réplicas.
+Dos bloques de contenido:
+
+- **Fundamentos del CKA** (almacenamiento nativo, PV/PVC, montajes) →
+  [fundamentals/](fundamentals/). Empieza por aquí si preparas el examen.
+- **Almacenamiento distribuido** (este laboratorio): **MinIO** (objetos) y
+  **Longhorn** (bloques) sobre los mismos dos nodos de storage.
+
+---
+
+## Laboratorio de almacenamiento distribuido
+
+Explora **almacenamiento distribuido** en Kubernetes: **MinIO** (objetos) y
+**Longhorn** (bloques). Ambos sistemas corren sobre los **mismos dos nodos de
+storage**, y la distribución sale de que cada nodo aporta varios drives/réplicas.
 
 ## Nodos de storage (compartidos)
 

@@ -20,10 +20,16 @@ rootPassword: minio-cka-lab-2026
 
 # --- Persistencia: un PVC por drive (volumeClaimTemplate del StatefulSet) ---
 # En producción cada drive debería ser un disco físico dedicado (XFS, JBOD),
-# no varias carpetas del mismo disco. En kind van sobre local-path (mismo disco).
+# no varias carpetas del mismo disco.
+# Se OMITE storageClass a propósito -> usa la StorageClass por DEFECTO del cluster.
+# Así el mismo value vale en los dos entornos sin tocar nada:
+#   - multipass (kubeadm): default = 'local-path' (la instala stack.ps1)
+#   - kind:                default = 'standard'
+# IMPORTANTE: debe ser una SC de DISCO LOCAL. MinIO ya replica con erasure coding,
+# así que NO debe ir sobre Longhorn (sería doble replicación).
 persistence:
   enabled: true
-  storageClass: standard
+  # storageClass: ""   # vacío/omitido = StorageClass por defecto del cluster
   size: 5Gi          # por drive
 
 # --- Recursos (subir en producción; MinIO escala con CPU/red/RAM) ---
