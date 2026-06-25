@@ -6,6 +6,10 @@ Dominio **Services & Networking** del CKA (≈20% del examen).
   NetworkPolicies) → [fundamentals/](fundamentals/). **Empieza por aquí.**
 - **CNI en profundidad** (Flannel, Calico, eBPF/Cilium e implicaciones) →
   [fundamentals/cni-plugins.md](fundamentals/cni-plugins.md).
+- **Ingress en profundidad** (recurso vs controller, ciclo de vida, TLS/SNI,
+  rewrites, patrones avanzados) → [fundamentals/ingress.md](fundamentals/ingress.md).
+- **Comandos rápidos y setup del examen** (alias, `$do`, vimrc, imperativos por
+  recurso) → [fundamentals/comandos-rapidos.md](fundamentals/comandos-rapidos.md).
 
 ---
 

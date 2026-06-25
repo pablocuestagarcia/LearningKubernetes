@@ -166,6 +166,10 @@ Conceptos que el examen distingue bien:
 - El Service **solo enruta a Pods `Ready`**. Un Pod que falla su readiness probe
   **sale** del balanceo automáticamente.
 
+> **Atajo de examen:** no escribas el Service a mano —
+> `kubectl expose deploy web --port=80 --target-port=8080` lo crea al instante.
+> Ver [comandos-rapidos.md §3](comandos-rapidos.md#3-services).
+
 ---
 
 ## 6. Tipos de Service
@@ -337,6 +341,10 @@ Conceptos clave del examen:
 - **TLS**: se referencia un `Secret` de tipo `tls` con `tls.crt`/`tls.key`.
 - El Ingress habla con **Services** (no con Pods directamente).
 
+> **Deep-dive:** cómo funciona el Ingress por dentro (ciclo de vida de la
+> petición, reconciliación del controller, data path hacia los Pods, TLS/SNI,
+> rewrites y patrones avanzados) en [ingress.md](ingress.md).
+
 ---
 
 ## 11. Gateway API
@@ -482,8 +490,11 @@ kubectl get ingress; kubectl describe ingress <ing>
 ## 15. Chuletas de referencia
 
 ### Tipos de Service
-`ClusterIP` = interno · `NodePort` = `IP_nodo:30000–32767` · `LoadBalancer` = LB
-externo · `ExternalName` = CNAME · `clusterIP: None` = headless (DNS→IPs de Pod).
+* `ClusterIP` = interno 
+* `NodePort` = `IP_nodo:30000–32767` 
+* `LoadBalancer` = LB externo 
+* `ExternalName` = CNAME 
+* `clusterIP: None` = headless (DNS→IPs de Pod).
 
 ### Puertos del Service
 `port` = puerto del Service · `targetPort` = puerto del Pod · `nodePort` = puerto
@@ -504,6 +515,43 @@ Pod (IP) → Endpoints → DNS → ClusterIP/kube-proxy → NetworkPolicy → In
 ### Ámbitos
 Service, Endpoints, Ingress, NetworkPolicy = **namespace** · CNI, kube-proxy,
 CoreDNS = **cluster** (componentes de sistema).
+
+---
+
+## Referencias a documentación oficial
+
+> **Examen:** durante el CKA solo puedes abrir **una pestaña** a la documentación
+> oficial. Dominios permitidos: `kubernetes.io/docs` (y subdominios como
+> `kubernetes.io/blog`). Los enlaces de proveedores (Calico, Cilium…) son **para
+> estudio**: normalmente **no** son accesibles dentro del examen.
+
+Atajos por tema (accesibles en examen — `kubernetes.io`):
+
+| Tema | Enlace |
+| --- | --- |
+| Índice Services & Networking | https://kubernetes.io/docs/concepts/services-networking/ |
+| Modelo de red del cluster | https://kubernetes.io/docs/concepts/cluster-administration/networking/ |
+| Service | https://kubernetes.io/docs/concepts/services-networking/service/ |
+| Virtual IPs y kube-proxy (modos) | https://kubernetes.io/docs/reference/networking/virtual-ips/ |
+| `externalTrafficPolicy` / traffic policy | https://kubernetes.io/docs/concepts/services-networking/service-traffic-policy/ |
+| EndpointSlices | https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/ |
+| DNS de Services y Pods | https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/ |
+| Depurar resolución DNS | https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/ |
+| Ingress | https://kubernetes.io/docs/concepts/services-networking/ingress/ |
+| Ingress Controllers | https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/ |
+| Gateway API | https://kubernetes.io/docs/concepts/services-networking/gateway/ |
+| NetworkPolicies | https://kubernetes.io/docs/concepts/services-networking/network-policies/ |
+| Plugins de red (CNI) | https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/ |
+| Puertos y protocolos | https://kubernetes.io/docs/reference/networking/ports-and-protocols/ |
+| Conectar frontend/backend con Service | https://kubernetes.io/docs/tasks/access-application-cluster/connecting-frontend-backend/ |
+
+Referencia de API (para campos exactos de manifests):
+
+| Recurso | Enlace |
+| --- | --- |
+| `Service` (v1) | https://kubernetes.io/docs/reference/kubernetes-api/service-resources/service-v1/ |
+| `Ingress` (networking.k8s.io/v1) | https://kubernetes.io/docs/reference/kubernetes-api/service-resources/ingress-v1/ |
+| `NetworkPolicy` (networking.k8s.io/v1) | https://kubernetes.io/docs/reference/kubernetes-api/policy-resources/network-policy-v1/ |
 
 ---
 

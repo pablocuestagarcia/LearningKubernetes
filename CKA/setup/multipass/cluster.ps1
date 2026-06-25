@@ -29,8 +29,10 @@ param(
     [ValidateSet('up', 'down', 'status', 'kubeconfig', 'cni', 'metrics')]
     [string]$Action = 'status',
 
-    [int]$Workers = 2,                 # nodos de workloads (sin taint)
-    [int]$DataNodes = 2,               # nodos de datos/storage (label + taint)
+    [ValidateRange(0, 20)]
+    [int]$Workers = 2,                 # nodos de workloads (sin taint); 0 = ninguno
+    [ValidateRange(0, 20)]
+    [int]$DataNodes = 2,               # nodos de datos/storage (label + taint); 0 = ninguno
     [string]$Image = '24.04',
     [string]$Cpus = '2',
     [string]$Memory = '2G',            # memoria base (control-plane y, por defecto, el resto)
@@ -40,15 +42,21 @@ param(
     [string]$DataDisk = '30G',         # disco mayor para los data nodes
     [string]$PodCidr = '10.244.0.0/16',
 
-    [ValidateSet('flannel', 'calico', 'cilium')]
-    [string]$Cni = 'flannel',          # CNI a instalar (cilium = datapath eBPF)
-    [bool]$MetricsServer = $true        # instalar metrics-server (kubectl top / HPA)
+    [ValidateSet('flannel', 'calico', 'cilium', 'none')]
+    [string]$Cni = 'flannel',          # CNI a instalar (cilium = eBPF; none = no instalar)
+    [bool]$MetricsServer = $true,       # instalar metrics-server (kubectl top / HPA)
+    [bool]$Bootstrap = $true            # $false = solo crear/preparar las VMs (practicar kubeadm a mano)
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ($DataNodes -lt 2 -and $Action -eq 'up') {
-    Write-Host "Aviso: con menos de 2 data nodes no hay réplicas de datos." -ForegroundColor Yellow
+if ($Action -eq 'up') {
+    if ($DataNodes -eq 0) {
+        Write-Host "Aviso: -DataNodes 0 -> sin nodos de storage; los labs de MinIO/Longhorn no podrán programarse." -ForegroundColor Yellow
+    }
+    elseif ($DataNodes -lt 2) {
+        Write-Host "Aviso: con menos de 2 data nodes no hay réplicas de datos." -ForegroundColor Yellow
+    }
 }
 
 $CpName = 'cka-cp'
@@ -58,14 +66,20 @@ if (-not $WorkerMemory) { $WorkerMemory = $Memory }
 if (-not $DataMemory)   { $DataMemory   = $Memory }
 
 # Especificación de nodos: nombre, rol, disco y memoria.
+# Nota: en PowerShell `1..0` NO es vacío, es @(1,0); por eso se guarda con un if
+# para que -Workers 0 / -DataNodes 0 creen realmente cero nodos de ese tipo.
 $NodeSpecs = @()
 $NodeSpecs += [pscustomobject]@{ Name = $CpName; Role = 'control-plane'; Disk = $Disk; Memory = $Memory }
-1..$Workers   | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-w$_";    Role = 'worker';  Disk = $Disk;     Memory = $WorkerMemory } }
-1..$DataNodes | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-data$_"; Role = 'storage'; Disk = $DataDisk; Memory = $DataMemory } }
+if ($Workers -gt 0) {
+    1..$Workers | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-w$_"; Role = 'worker'; Disk = $Disk; Memory = $WorkerMemory } }
+}
+if ($DataNodes -gt 0) {
+    1..$DataNodes | ForEach-Object { $NodeSpecs += [pscustomobject]@{ Name = "cka-data$_"; Role = 'storage'; Disk = $DataDisk; Memory = $DataMemory } }
+}
 
 $WorkerSpecs = $NodeSpecs | Where-Object { $_.Role -ne 'control-plane' }
 $DataSpecs   = $NodeSpecs | Where-Object { $_.Role -eq 'storage' }
-$CloudInit = Join-Path $PSScriptRoot 'cloud-init.yaml'
+$ProvisionScript = Join-Path $PSScriptRoot 'provision-node.sh'
 $KubeconfigOut = Join-Path $PSScriptRoot 'kubeconfig'
 
 function Assert-Tooling {
@@ -95,6 +109,16 @@ function Test-OnVm([string]$Name, [string]$Cmd) {
     return ($LASTEXITCODE -eq 0)
 }
 
+# Transfiere y ejecuta provision-node.sh dentro de la VM (idempotente).
+# Aprovisionar por exec (en vez de --cloud-init en el launch) evita que el daemon
+# de Multipass en Windows se cuelgue esperando a un cloud-init largo.
+function Install-NodePrereqs([string]$Name) {
+    multipass transfer $ProvisionScript "${Name}:/tmp/provision-node.sh"
+    if ($LASTEXITCODE -ne 0) { throw "No se pudo transferir el script de aprovisionamiento a $Name." }
+    multipass exec $Name -- sudo bash /tmp/provision-node.sh
+    if ($LASTEXITCODE -ne 0) { throw "Fallo aprovisionando $Name. Revisa la salida de arriba." }
+}
+
 # kubectl en el control-plane usando el admin.conf.
 # OJO: el parámetro NO puede llamarse $Args (variable automática de PowerShell).
 function Invoke-Kubectl([string]$CmdArgs) {
@@ -115,6 +139,11 @@ function Export-Kubeconfig {
 
 # Instala el CNI elegido (-Cni). Todo se ejecuta en el control-plane.
 function Install-Cni {
+    if ($Cni -eq 'none') {
+        Write-Host "CNI: ninguno (-Cni none). Los nodos quedaran 'NotReady' hasta que instales uno." -ForegroundColor Yellow
+        Write-Host "  Instala uno luego con:  ./cluster.ps1 cni -Cni flannel|calico|cilium" -ForegroundColor Yellow
+        return
+    }
     Write-Host "Instalando CNI: $Cni..." -ForegroundColor Cyan
     switch ($Cni) {
         'flannel' {
@@ -180,21 +209,50 @@ Assert-Tooling
 
 switch ($Action) {
     'up' {
-        # 1. Lanzar VMs con la preparación de cloud-init
-        foreach ($spec in $NodeSpecs) {
+        # 1. Lanzar las VMs base (sin cloud-init).
+        #    Se lanzan de una en una con --timeout para que un arranque lento no
+        #    bloquee, y con una pausa entre VMs: lanzar varias muy seguidas puede
+        #    dejar wedged al daemon de Multipass con el driver Hyper-V.
+        for ($i = 0; $i -lt $NodeSpecs.Count; $i++) {
+            $spec = $NodeSpecs[$i]
             if (Test-VmExists $spec.Name) {
                 Write-Host "VM $($spec.Name) ya existe, se omite." -ForegroundColor Yellow
+                continue
             }
-            else {
-                Write-Host "Lanzando VM $($spec.Name) [$($spec.Role)] (mem $($spec.Memory), disk $($spec.Disk))..." -ForegroundColor Cyan
-                multipass launch $Image --name $spec.Name --cpus $Cpus --memory $spec.Memory --disk $spec.Disk --cloud-init $CloudInit
+            Write-Host "Lanzando VM $($spec.Name) [$($spec.Role)] (mem $($spec.Memory), disk $($spec.Disk))..." -ForegroundColor Cyan
+            # Lanzar la VM base SIN cloud-init: el launch solo espera al arranque
+            # (rápido), no a una instalación larga. El aprovisionamiento va aparte.
+            multipass launch $Image --name $spec.Name --cpus $Cpus --memory $spec.Memory --disk $spec.Disk --timeout 300
+            if ($LASTEXITCODE -ne 0) {
+                throw "Fallo al lanzar $($spec.Name). Si el daemon quedó colgado: reinicia el servicio (PowerShell admin) con 'Restart-Service Multipass -Force', luego 'multipass delete --all --purge' y reintenta. Ver readme.md (Troubleshooting)."
             }
+            if ($i -lt $NodeSpecs.Count - 1) { Start-Sleep -Seconds 5 }
         }
 
-        # 2. Esperar a que cloud-init termine en todas
+        # 2. Aprovisionar cada nodo (containerd, kubeadm/kubelet, open-iscsi...)
+        #    vía exec, con reintentos y progreso visible.
         foreach ($spec in $NodeSpecs) {
-            Write-Host "Esperando a cloud-init en $($spec.Name)..." -ForegroundColor Cyan
-            multipass exec $spec.Name -- cloud-init status --wait | Out-Null
+            Write-Host "Aprovisionando $($spec.Name) (containerd, kubeadm, open-iscsi)..." -ForegroundColor Cyan
+            Install-NodePrereqs $spec.Name
+        }
+
+        # 2b. Modo "preparar y parar": VMs listas (containerd, kubeadm, kubelet,
+        #     open-iscsi...) pero SIN bootstrap, para practicar kubeadm a mano.
+        if (-not $Bootstrap) {
+            $cpIp = Get-VmIp $CpName
+            Write-Host "`n=== VMs preparadas. Bootstrap omitido (-Bootstrap `$false). ===" -ForegroundColor Green
+            Write-Host "Practica kubeadm tú mismo:" -ForegroundColor Green
+            Write-Host "  1) En el control-plane:" -ForegroundColor Green
+            Write-Host "       multipass shell $CpName" -ForegroundColor Gray
+            Write-Host "       sudo kubeadm init --pod-network-cidr=$PodCidr --apiserver-advertise-address=$cpIp" -ForegroundColor Gray
+            Write-Host "       mkdir -p `$HOME/.kube && sudo cp /etc/kubernetes/admin.conf `$HOME/.kube/config && sudo chown `$(id -u):`$(id -g) `$HOME/.kube/config" -ForegroundColor Gray
+            Write-Host "  2) Instala un CNI (p. ej. Flannel):" -ForegroundColor Green
+            Write-Host "       kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml" -ForegroundColor Gray
+            Write-Host "  3) Token de join:  sudo kubeadm token create --print-join-command" -ForegroundColor Green
+            Write-Host "     Y en cada worker ($($WorkerSpecs.Name -join ', ')):  multipass shell <nodo>  ->  sudo kubeadm join ..." -ForegroundColor Gray
+            Write-Host "  4) Trae el kubeconfig al host:  ./cluster.ps1 kubeconfig" -ForegroundColor Green
+            Write-Host "`nNodos preparados: $($NodeSpecs.Name -join ', ')" -ForegroundColor Green
+            return
         }
 
         # 3. kubeadm init en el control-plane (si no está ya inicializado)
@@ -234,8 +292,11 @@ switch ($Action) {
             }
         }
 
-        # 6b. metrics-server (kubectl top / HPA)
-        if ($MetricsServer) { Install-MetricsServer }
+        # 6b. metrics-server (kubectl top / HPA). Sin CNI no tendría red -> se omite.
+        if ($MetricsServer -and $Cni -ne 'none') { Install-MetricsServer }
+        elseif ($MetricsServer -and $Cni -eq 'none') {
+            Write-Host "metrics-server omitido (sin CNI). Instálalo tras el CNI con: ./cluster.ps1 metrics" -ForegroundColor Yellow
+        }
 
         # 7. Exportar kubeconfig al host
         Write-Host ""

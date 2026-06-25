@@ -91,8 +91,65 @@ kubectl top nodes          # requiere metrics-server (se instala por defecto)
 | `flannel` | manifest | ligero, VXLAN, sin NetworkPolicy nativa |
 | `calico` | operador Tigera + `Installation` con el CIDR del cluster | NetworkPolicy completa, BGP/VXLAN |
 | `cilium` | CLI de Cilium (`cilium install`) | eBPF; base para kube-proxy replacement, Hubble |
+| `none` | no instala nada | nodos `NotReady`; instálalo tú (práctica) |
+
+Sin CNI (para instalarlo tú o practicar kubeadm): `./cluster.ps1 up -Cni none`
+(los nodos quedan `NotReady` hasta que instales uno con `./cluster.ps1 cni -Cni ...`).
 
 Desactivar metrics-server: `./cluster.ps1 up -MetricsServer $false`.
+
+### Número de nodos
+
+```powershell
+./cluster.ps1 up -Workers 3 -DataNodes 2   # 1 CP + 3 workers + 2 data nodes
+./cluster.ps1 up -Workers 1 -DataNodes 1   # mínimo ligero (3 VMs)
+./cluster.ps1 up -DataNodes 0              # SIN data nodes (1 CP + 2 workers)
+./cluster.ps1 up -Workers 1 -DataNodes 0  # cluster mínimo: 2 VMs (1 CP + 1 worker)
+```
+
+El **control-plane es 1** en esta variante (multi-CP en HA requiere un
+balanceador delante de los API servers, fuera de alcance aquí). Workers y data
+nodes son libres con `-Workers` / `-DataNodes` (rango 0–20).
+
+**`-DataNodes 0`** crea el cluster sin nodos de storage dedicados — perfecto si
+solo quieres practicar workloads, scheduling o kubeadm y no el lab de
+MinIO/Longhorn (que sí necesita data nodes). Con 1 worker y 0 data nodes tienes
+el cluster mínimo de 2 VMs.
+
+### Practicar kubeadm a mano (`-Bootstrap $false`)
+
+Por defecto el script automatiza `kubeadm init`, CNI y `join`. Para **practicar
+kubeadm tú mismo** (como en el examen), créalo sin bootstrap: levanta las VMs ya
+preparadas (containerd, kubeadm, kubelet, `open-iscsi`…) pero **sin inicializar
+nada**:
+
+```powershell
+./cluster.ps1 up -Bootstrap $false
+```
+
+Al terminar imprime los pasos. Resumen del flujo manual:
+
+```bash
+# 1) Control-plane
+multipass shell cka-cp
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=<IP-CP>
+mkdir -p $HOME/.kube && sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config && sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+# 2) CNI (ejemplo Flannel)
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+
+# 3) Join en cada worker
+sudo kubeadm token create --print-join-command   # en el CP -> copia la salida
+multipass shell cka-w1                            # y en cada worker
+sudo kubeadm join ...                             # pega el comando
+
+# 4) Trae el kubeconfig al host
+exit
+./cluster.ps1 kubeconfig
+```
+
+Así practicas `kubeadm init`, instalación de CNI, `kubeadm join`, `kubeadm token`,
+`kubeadm reset`, upgrades, etc. — el dominio *Cluster Architecture* del CKA.
 
 ### Métricas: metrics-server vs. Prometheus (FreeLens)
 
@@ -125,8 +182,11 @@ Después, en FreeLens → *Settings → Metrics*, apunta Prometheus al Service
 
 ## Qué hace `cluster.ps1 up`
 
-1. Lanza las VMs con [cloud-init.yaml](cloud-init.yaml) (containerd, Kubernetes
-   v1.34, `open-iscsi`, `nfs-common`, swap off, sysctl/módulos).
+1. Lanza las **VMs base** (sin cloud-init) y luego las **aprovisiona** una a una
+   con [provision-node.sh](provision-node.sh) vía `multipass exec` (containerd,
+   Kubernetes v1.34, `open-iscsi`, `nfs-common`, swap off, sysctl/módulos).
+   Se hace así —y no con `--cloud-init` en el `launch`— porque en Windows el
+   daemon de Multipass tiende a colgarse esperando a un cloud-init largo.
 2. `kubeadm init` en el control-plane (`--pod-network-cidr=10.244.0.0/16`).
 3. Instala el **CNI** elegido (`-Cni`, por defecto Flannel).
 4. Une todos los workers (workloads + data nodes) con el token de `kubeadm`.
@@ -190,3 +250,37 @@ las VMs); para conservarlos habría que hacer backups (Longhorn → MinIO, S3).
   variante instala Cilium con kube-proxy presente (datapath eBPF) por simplicidad.
 - Para un control-plane en HA (2+ CP) haría falta un balanceador delante de los
   API servers; se sale del alcance de esta variante ligera.
+
+## Troubleshooting
+
+### El `up` se queda bloqueado creando una VM (daemon de Multipass colgado)
+
+Síntoma: la creación de una VM no avanza y **cualquier** comando (`multipass list`,
+`multipass version`) también se cuelga → el daemon `multipassd` está *wedged*
+(cuelgue conocido del driver Hyper-V al lanzar VMs seguidas).
+
+Recuperación (PowerShell **como administrador**):
+
+```powershell
+Restart-Service Multipass -Force
+# Si 'multipass list' sigue colgado, reinicio duro:
+#   Stop-Service Multipass -Force; Stop-Process -Name multipassd -Force; Start-Service Multipass
+multipass list                 # ver qué quedó a medias
+multipass delete --all --purge # limpiar VMs parciales
+```
+
+Después, reintenta `./cluster.ps1 up`. El script lanza las VMs de una en una,
+con `--timeout` y una pausa entre ellas, y **las VMs base se lanzan sin
+cloud-init** (el aprovisionamiento va aparte por `exec`) — esto reduce mucho el
+cuelgue, porque el `launch` ya no espera a una instalación larga.
+
+### `Timed out waiting for instance launch`
+
+Si el `launch` de una VM da timeout (y `multipass list` también se cuelga), es el
+mismo cuelgue del daemon: aplica la recuperación de arriba (reinicio del servicio
++ `multipass delete --all --purge`) y reintenta. Multipass sobre Hyper-V es algo
+inestable; si se repite, prueba a lanzar menos VMs (`-Workers 1 -DataNodes 0`)
+para validar que el daemon aguanta, o reinicia Windows para dejar Hyper-V limpio.
+
+> La GUI de Multipass no suele causar el cuelgue, pero cerrarla fuerza un reinicio
+> limpio del daemon (en Windows detiene las instancias), lo que ayuda a recuperar.

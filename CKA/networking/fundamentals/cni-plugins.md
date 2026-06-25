@@ -315,6 +315,34 @@ network for sandbox".
 
 ---
 
+## Referencias a documentación
+
+> **Examen:** lo único accesible en el CKA es `kubernetes.io` (docs + blog). Las
+> docs de Calico/Cilium/Flannel son **para estudio** y **no** estarán disponibles
+> en el examen; allí basta con localizar y diagnosticar el CNI ya instalado.
+
+Accesible en examen (`kubernetes.io`):
+
+| Tema | Enlace |
+| --- | --- |
+| Plugins de red (CNI) | https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/ |
+| Modelo de red del cluster | https://kubernetes.io/docs/concepts/cluster-administration/networking/ |
+| Instalar un proveedor de NetworkPolicy | https://kubernetes.io/docs/tasks/administer-cluster/network-policy-provider/ |
+| Addons del cluster | https://kubernetes.io/docs/concepts/cluster-administration/addons/ |
+| Verificar tareas de red en `kubeadm` | https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/#pod-network |
+
+Solo para estudio (docs de proveedores y especificaciones):
+
+| Recurso | Enlace |
+| --- | --- |
+| Especificación CNI | https://github.com/containernetworking/cni |
+| Calico | https://docs.tigera.io/calico/latest/about/ |
+| Cilium | https://docs.cilium.io/en/stable/ |
+| Flannel | https://github.com/flannel-io/flannel |
+| eBPF (proyecto) | https://ebpf.io/ |
+
+---
+
 ## Relación con el resto del módulo
 
 - Base conceptual del CNI y el modelo de red: [concepts.md §4](concepts.md#4-el-cni-quién-implementa-la-red).
